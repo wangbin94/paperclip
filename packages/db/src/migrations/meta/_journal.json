@@ -3060,6 +3060,20 @@
       "when": 1793996706927,
       "tag": "0438_mighty_outlaw_kid",
       "breakpoints": true
+    },
+    {
+      "idx": 439,
+      "version": "7",
+      "when": 1794034317805,
+      "tag": "0439_brainy_supernaut",
+      "breakpoints": true
+    },
+    {
+      "idx": 440,
+      "version": "7",
+      "when": 1794034327911,
+      "tag": "0440_typical_epoch",
+      "breakpoints": true
     }
   ]
 }

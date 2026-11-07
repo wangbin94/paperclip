@@ -115,6 +115,7 @@ import { environmentRuntimeService } from "./services/environment-runtime.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
+import { issueTaskOperationRoutes } from "./routes/issue-task-operations.js";
 import { caseRoutes } from "./routes/cases.js";
 import { caseHandoffRoutes } from "./routes/case-handoffs.js";
 import { workflowRoutes } from "./routes/workflows.js";
@@ -788,6 +789,7 @@ export async function createApp(
   api.use(caseHandoffRoutes(db));
   api.use(workflowRoutes(db));
   api.use(issueTreeControlRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(issueTaskOperationRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(fileResourceRoutes(db, { remoteFiles: createRemoteWorkspaceFiles(db, {
     environmentRuntime: environmentRuntimeService(db, { pluginWorkerManager: workerManager }),
     loadSavedWorkspace: createSavedWorkspaceLoader(db, opts.storageService),

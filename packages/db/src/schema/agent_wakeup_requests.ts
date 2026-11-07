@@ -96,6 +96,13 @@ export const agentWakeupRequests = pgTable(
       .on(table.companyId, table.idempotencyKey)
       .concurrently()
       .where(sql`${table.idempotencyKey} LIKE 'tree-hold-resume:%' AND ${table.status} <> 'skipped'`),
+    // A task operation owes its committed intent one wake, ever, and each
+    // intent owns at most one downstream admission. Skipped, failed and
+    // cancelled rows keep the key so a replay cannot produce a second wake.
+    taskOperationIdempotencyUq: uniqueIndex("agent_wakeup_requests_task_operation_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .concurrently()
+      .where(sql`${table.idempotencyKey} LIKE 'task-operation:%' OR ${table.idempotencyKey} LIKE 'task-operation-dispatch:%'`),
     chatCompletionIdempotencyUq: uniqueIndex("agent_wakeup_requests_chat_completion_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} LIKE 'chat-completion:%'`),

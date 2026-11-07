@@ -4375,6 +4375,7 @@ export function heartbeatService(
         resume: scope => heartbeatQueue.resumeDeferredExecutionReceipts(scope),
         settleTaskChat: scope => reconcileTaskChatRetryReceipts(db, { ...scope, settleOnly: true }),
         createNativeBatch: heartbeatQueue.createNativeStatusWakeBatch,
+        dispatchTaskOperations: scope => heartbeatQueue.dispatchPendingTaskOperationWakeups(scope),
         schedulingSuppressed: async () => (await getSchedulingSuppression(true)).suppressed,
       }, () => canRun() && readTaskDrain(new Date()) === null),
     readIdleWatchdogSchedule: taskWatchdogs.readIdleSchedule,

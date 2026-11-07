@@ -17,6 +17,7 @@ export const DELIVERY_QUEUES = {
   deferredExecutionReceipts: "deferred-execution-receipts",
   taskRetryReceiptSettlement: "task-retry-receipt-settlement",
   nativeStatusWakeIntents: "native-status-wake-intents",
+  taskOperationWakeIntents: "task-operation-wake-intents",
   orphanBlockers: "orphan-blockers",
   activeRecoveryActions: "active-recovery-actions",
   strandedAssignments: "stranded-assignments",

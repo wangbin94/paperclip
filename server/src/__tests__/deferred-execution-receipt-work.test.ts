@@ -21,6 +21,7 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { notifyDeferredExecutionEligibility, notifyDeferredExecutionWork, notifyNativeStatusWakeWork, notifyTaskRetrySettlement } from "../services/deferred-execution-notifications.js";
 import { registerDeferredReceiptWork } from "../services/heartbeat/deferred-receipt-work.js";
+import { insertTaskOperationWakeIntent } from "../services/heartbeat/task-operation-wake-intents.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { requestTaskRetry } from "../services/task-retry.js";
 import { issueService } from "../services/issues.js";
@@ -260,7 +261,7 @@ describe("deferred receipt durable dispatch", () => {
     const checked = new Set<string>();
     await registerDeferredReceiptWork(db, coordinator, {
       resume: async scope => { checked.add(scope.requestId!); },
-      settleTaskChat: async () => {}, createNativeBatch: () => async () => {}, schedulingSuppressed: async () => false,
+      settleTaskChat: async () => {}, dispatchTaskOperations: async () => {}, createNativeBatch: () => async () => {}, schedulingSuppressed: async () => false,
     }, () => !drain).ready;
     for (let pass = 0; pass < 12; pass++) {
       await db.transaction(tx => notifyDeferredExecutionEligibility(tx, { companyId: f.companyId }));
@@ -508,7 +509,7 @@ describe("deferred receipt durable dispatch", () => {
     const resume = vi.fn(async (scope: { onError?: (error: unknown) => void }) => {
       if (fail) { failedAt = Date.now(); scope.onError?.(failure); }
     });
-    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: async () => {}, createNativeBatch: () => async () => {},
+    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: async () => {}, dispatchTaskOperations: async () => {}, createNativeBatch: () => async () => {},
       schedulingSuppressed: async () => false }, () => !drain).ready;
     expect(errors).toHaveLength(1);
     expect((errors[0] as AggregateError).errors[0].errors).toEqual([failure]);
@@ -585,6 +586,37 @@ describe("deferred receipt durable dispatch", () => {
     const f = await fixture(), cohort = await nativeCohort(f);
     await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
     await nativeCohortResult(f, cohort); await quiet();
+  });
+  it("reconstructs a task-operation intent committed before restart into exactly one real run", async () => {
+    const f = await fixture();
+    const [previous] = await db.insert(agents).values({ companyId: f.companyId, name: "Previous assignee",
+      adapterType: "process", status: "idle" }).returning();
+    await db.update(issues).set({ assigneeAgentId: previous.id }).where(eq(issues.id, f.issue.id));
+    const intent = await db.transaction(async tx => {
+      const [updated] = await tx.update(issues).set({ assigneeAgentId: f.agent.id,
+        statusVersion: sql`${issues.statusVersion} + 1` }).where(eq(issues.id, f.issue.id)).returning();
+      return (await insertTaskOperationWakeIntent(tx as never, { companyId: f.companyId, issueId: f.issue.id,
+        operation: "reassign", operationId: randomUUID(), expectedAssigneeAgentId: f.agent.id, expectedStatus: "todo",
+        expectedStatusVersion: updated.statusVersion, requestedBy: { actorType: "user", actorId: f.actorId } })).intent;
+    });
+    // The worker registers after the commit, so its notification is gone:
+    // only startup reconstruction can discover the intent.
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
+    await waitForReal(async () => {
+      await Promise.allSettled([...passes]); await heartbeat.drainActiveRunExecutions();
+      const [saved] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, intent.id));
+      expect(saved.status, JSON.stringify({ saved, errors })).toBe("coalesced");
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, saved.runId!));
+      expect(run.status, JSON.stringify({ error: run.error, code: run.errorCode })).toBe("succeeded");
+      expect(run.stdoutExcerpt).toContain("receipt-proof");
+      expect(run.contextSnapshot).toMatchObject({ source: "task_operation", taskOperationIntentId: intent.id,
+        wakeReason: "task_operation_reassign" });
+    }, { timeout: 15_000 });
+    await finish(f.issue.id);
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId));
+    expect(runs.filter(run => run.contextSnapshot?.taskOperationIntentId === intent.id)).toHaveLength(1);
+    await quiet();
   });
   it("preserves one dispatch for the canonical hundred-intent native batch", async () => {
     const f = await fixture(), cohort = await nativeCohort(f, 100);
@@ -677,7 +709,7 @@ describe("deferred receipt durable dispatch", () => {
     const check = vi.fn(async (scope: { companyId?: string; requestId?: string }) => {
       await db.update(agentWakeupRequests).set({ status: "skipped" }).where(eq(agentWakeupRequests.id, scope.requestId!));
     });
-    await registerDeferredReceiptWork(db, coordinator, { resume: check, settleTaskChat: vi.fn(), createNativeBatch: () => check,
+    await registerDeferredReceiptWork(db, coordinator, { resume: check, settleTaskChat: vi.fn(), dispatchTaskOperations: async () => {}, createNativeBatch: () => check,
       schedulingSuppressed: async () => false }, () => !drain).ready;
     const due = updatedAt.getTime() + (native ? 60_000 : 30_000);
     expect(coordinator.nextWakeAt()).toBe(due); expect(check).not.toHaveBeenCalled();
@@ -689,7 +721,7 @@ describe("deferred receipt durable dispatch", () => {
   it("reconciles the first drained producer and waits for resume without domain SQL", async () => {
     const f = await fixture(); drain = true;
     const resume = vi.fn(async () => {}), dispatchNative = vi.fn(async () => {});
-    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: vi.fn(), createNativeBatch: () => dispatchNative,
+    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: vi.fn(), dispatchTaskOperations: async () => {}, createNativeBatch: () => dispatchNative,
       schedulingSuppressed: async () => false }, () => !drain).ready;
     await db.transaction(async tx => {
       await notifyDeferredExecutionWork(tx, { companyId: f.companyId });
@@ -710,7 +742,7 @@ describe("deferred receipt durable dispatch", () => {
   ])("activates only the committed company's $name receipt after an empty start", async ({ payload }) => {
     const f = await fixture(), foreign = await fixture();
     const resume = vi.fn(async () => {});
-    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: vi.fn(), createNativeBatch: () => vi.fn(),
+    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: vi.fn(), dispatchTaskOperations: async () => {}, createNativeBatch: () => vi.fn(),
       schedulingSuppressed: async () => false }, () => !drain).ready;
     const [other] = await db.insert(agentWakeupRequests).values({ companyId: foreign.companyId, agentId: foreign.agent.id,
       source: "on_demand", status: "deferred_issue_execution", payload }).returning();
@@ -735,7 +767,7 @@ describe("deferred receipt durable dispatch", () => {
     await db.update(heartbeatRuns).set({ status: "cancelled", resultJson: { queuedCommentInterruptQueueId: wake.id } })
       .where(eq(heartbeatRuns.id, f.source.id));
     const resume = vi.fn(async () => {});
-    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: vi.fn(), createNativeBatch: () => vi.fn(),
+    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: vi.fn(), dispatchTaskOperations: async () => {}, createNativeBatch: () => vi.fn(),
       schedulingSuppressed: async () => false }, () => !drain).ready;
     expect(resume).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ companyId: f.companyId, requestId: wake.id }));
     await quiet();
@@ -861,7 +893,7 @@ describe("deferred receipt durable dispatch", () => {
       source: "on_demand", status: "deferred_issue_execution", payload, updatedAt: initialAt }).returning();
     const deps = createHeartbeatQueueTestDependencies(db), queue = createHeartbeatQueue(db, deps);
     await registerDeferredReceiptWork(db, coordinator, { resume: scope => queue.resumeDeferredExecutionReceipts(scope),
-      settleTaskChat: async () => {}, createNativeBatch: () => async () => {}, schedulingSuppressed: async () => false }, () => !drain).ready;
+      settleTaskChat: async () => {}, dispatchTaskOperations: async () => {}, createNativeBatch: () => async () => {}, schedulingSuppressed: async () => false }, () => !drain).ready;
     await vi.advanceTimersByTimeAsync(initialAt.getTime() + 10_000 - Date.now());
     const movedAt = new Date();
     const writer = createQueuedCommentIssueLockWriter(db, { syncCommentReferences: async () => {},
@@ -916,7 +948,7 @@ describe("deferred receipt durable dispatch", () => {
       requestedByActorType: "system", requestedByActorId: "native-status-committer" }).returning();
     const dispatchNative = vi.fn(async () => {});
     await registerDeferredReceiptWork(db, coordinator, { resume: async () => {}, settleTaskChat: async () => {},
-      createNativeBatch: () => dispatchNative, schedulingSuppressed: async () => false }, () => !drain).ready;
+      dispatchTaskOperations: async () => {}, createNativeBatch: () => dispatchNative, schedulingSuppressed: async () => false }, () => !drain).ready;
     await vi.advanceTimersByTimeAsync(initialAt.getTime() + 10_000 - Date.now());
     const movedAt = new Date();
     await db.update(agentWakeupRequests).set({ updatedAt: movedAt }).where(eq(agentWakeupRequests.id, wake.id));
@@ -931,7 +963,7 @@ describe("deferred receipt durable dispatch", () => {
     const resume = vi.fn(async (scope: { companyId?: string; requestId?: string }) => {
       await writeDeferredExecutionWait(db, { companyId: scope.companyId!, requestId: scope.requestId! }, { reason });
     });
-    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: async () => {}, createNativeBatch: () => async () => {},
+    await registerDeferredReceiptWork(db, coordinator, { resume, settleTaskChat: async () => {}, dispatchTaskOperations: async () => {}, createNativeBatch: () => async () => {},
       schedulingSuppressed: async () => false }, () => !drain).ready;
     const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agent.id,
       source: "on_demand", status: "deferred_issue_execution", reason: "task_retry" }).returning();
@@ -1072,7 +1104,7 @@ describe("deferred receipt durable dispatch", () => {
   });
   it("outer rollback and nested savepoint rollback do not dispatch receipt intent", async () => {
     const f = await fixture(); const dispatchNative = vi.fn(async () => {});
-    await registerDeferredReceiptWork(db, coordinator, { resume: vi.fn(), settleTaskChat: vi.fn(), createNativeBatch: () => dispatchNative,
+    await registerDeferredReceiptWork(db, coordinator, { resume: vi.fn(), settleTaskChat: vi.fn(), dispatchTaskOperations: async () => {}, createNativeBatch: () => dispatchNative,
       schedulingSuppressed: async () => false }, () => !drain).ready;
     await expect(db.transaction(async tx => {
       await notifyNativeStatusWakeWork(tx, { companyId: f.companyId });

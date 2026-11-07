@@ -799,6 +799,8 @@ export interface WakeupOptions {
   queuedCommentInterruptId?: string;
   /** Internal delivery of an existing undelivered user comment. */
   queuedCommentRequestId?: string;
+  /** Internal dispatch of a claimed task-operation wake intent. Never accepted from public wake payloads. */
+  taskOperationIntentId?: string;
   /** Internal delivery of the authenticated task-level Retry receipt. */
   taskRetryRequestId?: string;
   /** Exact failed run selected by an authenticated board Retry request. */

@@ -1,11 +1,12 @@
 import { PersistedExecutionWaitRefusal } from "../deferred-execution-wait.js";
-import { and, asc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, like, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, type Db } from "@paperclipai/db";
 import type { createDeliveryWorkCoordinator } from "../delivery-work-coordinator.js";
 import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
 import type { DeferredExecutionScope, DeferredReceiptRecoveryOptions } from "../deferred-execution-notifications.js";
 import { registerScopedDeadlineWork } from "../scoped-deadline-work.js";
 import { issueBlockersResolvedWakePayloadSql } from "../issue-dependency-wakeups.js";
+import { TASK_OPERATION_INTENT_KEY_PREFIX } from "./task-operation-wake-intents.js";
 
 type Entry = { id: string; companyId: string; dueAt: number; immediate: boolean };
 type NativeIntentOptions = DeferredExecutionScope & {
@@ -20,19 +21,23 @@ export function registerDeferredReceiptWork(
     resume(scope: DeferredReceiptRecoveryOptions): Promise<unknown>;
     settleTaskChat(scope: DeferredExecutionScope): Promise<unknown>;
     createNativeBatch(): (scope: NativeIntentOptions) => Promise<unknown>;
+    dispatchTaskOperations(scope: NativeIntentOptions): Promise<unknown>;
     schedulingSuppressed(): Promise<boolean>;
   },
   canRun: () => boolean,
 ) {
-  function register(kind: "deferred" | "task_chat" | "native") {
+  function register(kind: "deferred" | "task_chat" | "native" | "task_operation") {
+    // Both intent kinds are durable outbox rows claimed before admission.
+    const intent = kind === "native" || kind === "task_operation";
     const cursors = new Map<string, string>();
     let enabled = false;
     let dispatchNative: ReturnType<typeof owner.createNativeBatch>;
     const queue = kind === "deferred" ? DELIVERY_QUEUES.deferredExecutionReceipts
-      : kind === "task_chat" ? DELIVERY_QUEUES.taskRetryReceiptSettlement : DELIVERY_QUEUES.nativeStatusWakeIntents;
+      : kind === "task_chat" ? DELIVERY_QUEUES.taskRetryReceiptSettlement
+        : kind === "native" ? DELIVERY_QUEUES.nativeStatusWakeIntents : DELIVERY_QUEUES.taskOperationWakeIntents;
     return registerScopedDeadlineWork<Entry, DeferredExecutionScope>(coordinator, {
       queue,
-      batchSize: kind === "native" ? 100 : undefined,
+      batchSize: intent ? 100 : undefined,
       reconstructionIntervalMs: 30_000,
       beforePass: async () => {
         enabled = !(await owner.schedulingSuppressed());
@@ -66,6 +71,9 @@ export function registerDeferredReceiptWork(
             eq(agentWakeupRequests.requestedByActorType, "system"),
             eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
             inArray(agentWakeupRequests.status, ["queued", "claimed"]), isNull(agentWakeupRequests.runId),
+          ) : kind === "task_operation" ? and(
+            like(agentWakeupRequests.idempotencyKey, `${TASK_OPERATION_INTENT_KEY_PREFIX}%`),
+            inArray(agentWakeupRequests.status, ["queued", "claimed"]), isNull(agentWakeupRequests.runId),
           ) : and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
             kind === "task_chat" ? and(eq(agentWakeupRequests.reason, "task_retry"),
               sql`${agentWakeupRequests.payload}#>>'{taskRetry,chatActionId}' is not null`) : or(
@@ -85,8 +93,8 @@ export function registerDeferredReceiptWork(
         if (complete) cursors.delete(key); else cursors.set(key, rows.at(-1)!.id);
         const now = Date.now();
         return { rows: rows.map(row => {
-          const deadline = kind === "native" && row.status === "claimed" && row.claimedAt ? row.claimedAt.getTime() + 60_000
-            : kind === "native" && row.error ? row.updatedAt.getTime() + 30_000
+          const deadline = intent && row.status === "claimed" && row.claimedAt ? row.claimedAt.getTime() + 60_000
+            : intent && row.error ? row.updatedAt.getTime() + 30_000
             : kind === "deferred" && row.delayed && !row.interruptedLegacy ? row.updatedAt.getTime() + 30_000
             : null;
           const immediate = deadline === null || deadline <= now;
@@ -105,9 +113,9 @@ export function registerDeferredReceiptWork(
           }).from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, entry.companyId),
             eq(agentWakeupRequests.id, entry.id)));
           if (!current) return null;
-          const due = kind === "native" && current.status === "claimed" && current.claimedAt
+          const due = intent && current.status === "claimed" && current.claimedAt
             ? current.claimedAt.getTime() + 60_000
-            : kind === "native" && current.status === "queued" && current.error ? current.updatedAt.getTime() + 30_000
+            : intent && current.status === "queued" && current.error ? current.updatedAt.getTime() + 30_000
               : kind === "deferred" && current.status === "deferred_issue_execution" && !current.interruptedLegacy
                 && (current.payload?.queuedCommentInterrupt || current.payload?.executionWait)
                 ? current.updatedAt.getTime() + 30_000 : null;
@@ -116,10 +124,12 @@ export function registerDeferredReceiptWork(
         const errors: unknown[] = [];
         let next: number | null = null;
         const scope = { companyId: entry.companyId, requestId: entry.id };
-        if (kind === "native") await dispatchNative({ ...scope,
-          onDeferredDeadline: at => { next = next === null ? at : Math.min(next, at); },
-          onError: error => { errors.push(error); },
-        });
+        const intentScope = { ...scope,
+          onDeferredDeadline: (at: number) => { next = next === null ? at : Math.min(next, at); },
+          onError: (error: unknown) => { errors.push(error); },
+        };
+        if (kind === "native") await dispatchNative(intentScope);
+        else if (kind === "task_operation") await owner.dispatchTaskOperations(intentScope);
         else if (kind === "task_chat") await owner.settleTaskChat(scope);
         else {
           const failed = (error: unknown) => { if (!(error instanceof PersistedExecutionWaitRefusal)) errors.push(error); };
@@ -131,7 +141,7 @@ export function registerDeferredReceiptWork(
       },
     }, canRun);
   }
-  const workers = [register("deferred"), register("task_chat"), register("native")];
+  const workers = [register("deferred"), register("task_chat"), register("native"), register("task_operation")];
   return { ready: Promise.all(workers.map(worker => worker.ready)),
     wake() { for (const worker of workers) worker.invalidate(); },
     async stop() { await Promise.all(workers.map(worker => worker.stop())); } };

@@ -55,6 +55,7 @@ import { taskChatRetrySourceCleanupPending } from "../chat-channels/task-retry-a
 import { validateNativeWorkspaceReconstruction } from "../native-runtime/native-workspace-reconstruction.js";
 import { isConversationAdapter } from "../conversation-continuation.js";
 import { recordExecutionWait } from "../execution-wait.js";
+import { assertTaskOperationWakeAuthority, createTaskOperationWakeDispatcher } from "./task-operation-wake-intents.js";
 import {
   getNativeReviewAssignment,
   readNativeReviewAssignmentContext,
@@ -2158,6 +2159,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       delete payload.queuedCommentInterrupt;
       delete payload.manualUserWake;
       delete payload.taskRetry;
+      if (!opts.taskOperationIntentId) delete payload.taskOperation;
     }
     if (opts.manualUserWake) {
       if (opts.requestedByActorType !== "user" || !opts.requestedByActorId || opts.failedRunId) {
@@ -2219,6 +2221,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
     let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    await assertTaskOperationWakeAuthority(db, { agentId, companyId: agent.companyId, issueId: issueId ?? null,
+      opts, contextSnapshot: enrichedContextSnapshot });
     if (issueId) {
       const [pending] = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, agent.companyId), eq(caseHandoffs.issueId, issueId),
         inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1);
@@ -5047,10 +5051,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     return { scanned: candidates.length, dispatched, recovered, deferred };
   }
 
+  const taskOperationWakes = createTaskOperationWakeDispatcher(db, {
+    enqueueWakeup,
+    getAgentInvokability,
+    getActivePauseHoldGate: (companyId, issueId) => treeControlSvc.getActivePauseHoldGate(companyId, issueId),
+  });
+
   return {
     enqueueWakeup,
     dispatchPendingNativeStatusWakeups,
     createNativeStatusWakeBatch,
+    dispatchPendingTaskOperationWakeups: taskOperationWakes.dispatch,
     startNextQueuedRunForAgent,
     countRunningRunsForAgent,
     releaseRunClaimedJustBeforeSuppression,

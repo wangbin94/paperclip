@@ -96,12 +96,6 @@ export const agentWakeupRequests = pgTable(
       .on(table.companyId, table.idempotencyKey)
       .concurrently()
       .where(sql`${table.idempotencyKey} LIKE 'tree-hold-resume:%' AND ${table.status} <> 'skipped'`),
-    // A task-operation receipt owes its assignee at most one admitted start
-    // wake. A replay after a lost reply must not queue the work twice.
-    taskOperationWakeIdempotencyUq: uniqueIndex("agent_wakeup_requests_task_operation_wake_uq")
-      .on(table.companyId, table.idempotencyKey)
-      .concurrently()
-      .where(sql`${table.idempotencyKey} LIKE 'task-operation:%'`),
     chatCompletionIdempotencyUq: uniqueIndex("agent_wakeup_requests_chat_completion_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} LIKE 'chat-completion:%'`),

@@ -789,7 +789,7 @@ export async function createApp(
   api.use(caseHandoffRoutes(db));
   api.use(workflowRoutes(db));
   api.use(issueTreeControlRoutes(db, { pluginWorkerManager: workerManager }));
-  api.use(issueTaskOperationRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(issueTaskOperationRoutes(db));
   api.use(fileResourceRoutes(db, { remoteFiles: createRemoteWorkspaceFiles(db, {
     environmentRuntime: environmentRuntimeService(db, { pluginWorkerManager: workerManager }),
     loadSavedWorkspace: createSavedWorkspaceLoader(db, opts.storageService),

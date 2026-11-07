@@ -20,7 +20,6 @@ export const issueTaskOperationReceipts = pgTable(
     requestId: text("request_id").notNull(),
     payloadDigest: text("payload_digest").notNull(),
     decision: jsonb("decision").$type<Record<string, unknown>>().notNull(),
-    wakeIdempotencyKey: text("wake_idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

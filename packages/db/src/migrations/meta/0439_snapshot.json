@@ -1,5 +1,5 @@
 {
-  "id": "7da7f695-3b64-408f-963c-7530e075623f",
+  "id": "3c8e4a83-3e44-48a8-a1f9-a0aa80aeed6c",
   "prevId": "69e6941f-890f-43d8-af7c-2e3e24ebfcd5",
   "version": "7",
   "dialect": "postgresql",
@@ -40582,12 +40582,6 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true
-        },
-        "wake_idempotency_key": {
-          "name": "wake_idempotency_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",

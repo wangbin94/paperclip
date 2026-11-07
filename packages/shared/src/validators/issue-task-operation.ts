@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Compare-and-set reassignment of an existing, unstarted (backlog/todo) task.
+ * Compare-and-set reassignment of an existing, unstarted backlog task.
  * `requestId` is the caller's stable idempotency id: a replay with the same
  * payload returns the stored receipt; a different payload is a 409 conflict.
  */
@@ -14,9 +14,12 @@ export const reassignUnstartedIssueSchema = z.object({
 
 export type ReassignUnstartedIssue = z.infer<typeof reassignUnstartedIssueSchema>;
 
-export const ISSUE_TASK_OPERATION_WAKE_STATES = ["not_required", "admitted", "not_admitted"] as const;
-export type IssueTaskOperationWakeState = (typeof ISSUE_TASK_OPERATION_WAKE_STATES)[number];
-
+/**
+ * Decision receipt for a backlog reassignment. Only backlog tasks are
+ * supported: a todo reassignment would owe the new assignee a start wake that
+ * cannot yet be admitted in the same transaction, so it is rejected with
+ * `todo_reassign_unsupported` instead of committing without a durable wake.
+ */
 export interface IssueTaskReassignDecision {
   operation: "reassign_unstarted";
   receiptId: string;
@@ -26,21 +29,13 @@ export interface IssueTaskReassignDecision {
   payloadDigest: string;
   fromAssigneeAgentId: string | null;
   toAssigneeAgentId: string;
-  issueStatus: "backlog" | "todo";
+  issueStatus: "backlog";
   statusVersion: number;
-  wakeRequired: boolean;
-  wakeIdempotencyKey: string | null;
+  startWake: "not_required";
   decidedAt: string;
 }
 
 export interface IssueTaskReassignResult {
   receipt: IssueTaskReassignDecision;
   replayed: boolean;
-  wake: {
-    state: IssueTaskOperationWakeState;
-    wakeupRequestId: string | null;
-    status: string | null;
-    /** Admission failed after the decision committed; replay the same request. */
-    error?: string;
-  };
 }

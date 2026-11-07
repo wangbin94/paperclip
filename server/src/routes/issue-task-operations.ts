@@ -4,10 +4,9 @@ import { issues as issueRows, type Db } from "@paperclipai/db";
 import { isUuidLike, reassignUnstartedIssueSchema } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
-import { accessService, heartbeatService } from "../services/index.js";
+import { accessService } from "../services/index.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { issueTaskOperationService } from "../services/issue-task-operations.js";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
@@ -16,14 +15,10 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
  * generic PATCH: each call is guarded by the caller's read versions and answered
  * from a durable receipt on replay.
  */
-export function issueTaskOperationRoutes(
-  db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
-) {
+export function issueTaskOperationRoutes(db: Db) {
   const router = Router();
   const access = accessService(db);
-  const heartbeat = heartbeatService(db, { pluginWorkerManager: options.pluginWorkerManager });
-  const operations = issueTaskOperationService(db, { wakeup: heartbeat.wakeup });
+  const operations = issueTaskOperationService(db);
 
   router.post(
     "/companies/:companyId/issues/:issueId/task-operations/reassign",

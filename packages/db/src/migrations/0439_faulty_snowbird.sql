@@ -8,7 +8,6 @@ CREATE TABLE "issue_task_operation_receipts" (
 	"request_id" text NOT NULL,
 	"payload_digest" text NOT NULL,
 	"decision" jsonb NOT NULL,
-	"wake_idempotency_key" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint

@@ -12,7 +12,6 @@ import {
   type Db,
 } from "@paperclipai/db";
 import type {
-  IssueTaskOperationWakeState,
   IssueTaskReassignDecision,
   IssueTaskReassignResult,
   ReassignUnstartedIssue,
@@ -22,11 +21,17 @@ import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
 
-export const TASK_OPERATION_WAKE_INDEX = "agent_wakeup_requests_task_operation_wake_uq";
 const RECEIPT_REQUEST_INDEX = "issue_task_operation_receipts_request_uq";
 
-/** Only work that has never started may be reassigned by this operation. */
-const UNSTARTED_STATUSES = ["backlog", "todo"] as const;
+/**
+ * Only backlog work, which never wakes an assignee, may be reassigned here.
+ * A todo reassignment owes the new assignee a start wake, and no existing
+ * wake admission can be saved in the caller's transaction without forging
+ * another owner's provenance (the only transactional wake outbox is the
+ * native status-decision intent). Todo therefore fails closed until a
+ * provider-neutral transactional wake intent exists.
+ */
+const REASSIGNABLE_STATUS = "backlog";
 /** Settled heartbeat runs. Every other status (queued, running, scheduled
  * retry, interrupted, or an unknown future status) keeps the task owned. */
 const SETTLED_RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"];
@@ -44,21 +49,6 @@ export type TaskOperationActor = {
   runId?: string | null;
   agentApiKeyId?: string | null;
 };
-
-type Wakeup = (agentId: string, opts: {
-  source: "assignment";
-  triggerDetail: "system";
-  reason: string;
-  payload: Record<string, unknown>;
-  requestedByActorType: TaskOperationActor["actorType"];
-  requestedByActorId: string;
-  idempotencyKey: string;
-  contextSnapshot: Record<string, unknown>;
-}) => Promise<unknown>;
-
-export function taskOperationWakeKey(receiptId: string) {
-  return `task-operation:${receiptId}`;
-}
 
 function digestReassign(issueId: string, input: ReassignUnstartedIssue) {
   // Fixed field order: the digest names the exact requested decision.
@@ -83,7 +73,7 @@ function denied(code: string, message: string, details: Record<string, unknown> 
  * permission checks remain with the caller; this service re-checks company
  * ownership of every row it touches.
  */
-export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
+export function issueTaskOperationService(db: Db) {
   async function findReceipt(tx: Db, companyId: string, issueId: string, actor: TaskOperationActor, requestId: string) {
     const [row] = await tx.select().from(issueTaskOperationReceipts).where(and(
       eq(issueTaskOperationReceipts.companyId, companyId),
@@ -124,8 +114,13 @@ export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
 
   /** Every guard that keeps this a reassignment of untouched work. */
   async function assertReassignable(tx: Db, issue: typeof issues.$inferSelect, input: ReassignUnstartedIssue) {
-    if (!(UNSTARTED_STATUSES as readonly string[]).includes(issue.status)) {
-      throw denied("issue_not_unstarted", "Only backlog or todo tasks can be reassigned", { status: issue.status });
+    if (issue.status === "todo") {
+      throw unprocessable("Reassigning a todo task needs a transactional start wake, which is not supported", {
+        code: "todo_reassign_unsupported", status: issue.status,
+      });
+    }
+    if (issue.status !== REASSIGNABLE_STATUS) {
+      throw denied("issue_not_unstarted", "Only backlog tasks can be reassigned", { status: issue.status });
     }
     if (issue.statusVersion !== input.expectedStatusVersion) {
       throw denied("stale_status_version", "Task status changed since it was read", {
@@ -191,67 +186,6 @@ export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
     }
   }
 
-  /** Reads the admitted start wake for a receipt, if one was saved. */
-  async function readWake(companyId: string, key: string) {
-    const [row] = await db.select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
-      .from(agentWakeupRequests).where(and(
-        eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, key),
-      )).limit(1);
-    return row ?? null;
-  }
-
-  /**
-   * Admits the start wake owed by a todo reassignment, at most once. The unique
-   * key index makes a concurrent or repeated admission a no-op; a replay only
-   * re-attempts while the task is still exactly as the receipt left it.
-   */
-  async function admitWake(decision: IssueTaskReassignDecision, actor: TaskOperationActor):
-    Promise<IssueTaskReassignResult["wake"]> {
-    if (!decision.wakeRequired || !decision.wakeIdempotencyKey) {
-      return { state: "not_required", wakeupRequestId: null, status: null };
-    }
-    const key = decision.wakeIdempotencyKey;
-    const existing = await readWake(decision.companyId, key);
-    if (existing) return { state: existing.status === "skipped" ? "not_admitted" : "admitted",
-      wakeupRequestId: existing.id, status: existing.status };
-    const [issue] = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId,
-      statusVersion: issues.statusVersion }).from(issues)
-      .where(and(eq(issues.companyId, decision.companyId), eq(issues.id, decision.issueId))).limit(1);
-    if (!issue || issue.status !== "todo" || issue.assigneeAgentId !== decision.toAssigneeAgentId ||
-        issue.statusVersion !== decision.statusVersion) {
-      // The task moved on; whoever moved it owns starting it.
-      return { state: "not_admitted", wakeupRequestId: null, status: null };
-    }
-    const admissionError = await deps.wakeup(decision.toAssigneeAgentId, {
-      source: "assignment",
-      triggerDetail: "system",
-      reason: "issue_assigned",
-      payload: { issueId: decision.issueId, mutation: "reassign", taskOperationReceiptId: decision.receiptId },
-      requestedByActorType: actor.actorType,
-      requestedByActorId: actor.actorId,
-      idempotencyKey: key,
-      contextSnapshot: {
-        issueId: decision.issueId,
-        taskId: decision.issueId,
-        source: "issue.task_operation.reassign",
-        wakeReason: "issue_assigned",
-        taskOperationReceiptId: decision.receiptId,
-      },
-    }).then(() => null, (error: unknown) => {
-      // Another admission already saved this receipt's wake; it owns the work.
-      if (isUniqueViolation(error, TASK_OPERATION_WAKE_INDEX)) return null;
-      // The decision is committed. Report the wake as not admitted so the
-      // caller replays the same request instead of assuming work started.
-      return error instanceof Error ? error.message : String(error);
-    });
-    const saved = await readWake(decision.companyId, key);
-    return saved
-      ? { state: saved.status === "skipped" ? "not_admitted" : "admitted",
-        wakeupRequestId: saved.id, status: saved.status }
-      : { state: "not_admitted" as IssueTaskOperationWakeState, wakeupRequestId: null, status: null,
-        ...(admissionError ? { error: admissionError } : {}) };
-  }
-
   async function decideReassign(companyId: string, issueId: string, actor: TaskOperationActor,
     input: ReassignUnstartedIssue, payloadDigest: string) {
     return db.transaction(async (tx) => {
@@ -264,19 +198,18 @@ export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
       await assertReassignable(tx, issue, input);
       const [updated] = await tx.update(issues).set({ assigneeAgentId: input.assigneeAgentId, updatedAt: new Date() })
         .where(and(
-          eq(issues.companyId, companyId), eq(issues.id, issueId),
+          eq(issues.companyId, companyId), eq(issues.id, issueId), eq(issues.status, REASSIGNABLE_STATUS),
           eq(issues.statusVersion, input.expectedStatusVersion),
           input.expectedAssigneeAgentId === null
             ? sql`${issues.assigneeAgentId} is null`
             : eq(issues.assigneeAgentId, input.expectedAssigneeAgentId),
-        )).returning({ status: issues.status, statusVersion: issues.statusVersion });
+        )).returning({ statusVersion: issues.statusVersion });
       if (!updated) throw denied("stale_status_version", "Task changed since it was read");
 
       const [receipt] = await tx.insert(issueTaskOperationReceipts).values({
         companyId, issueId, operation: "reassign_unstarted", actorType: actor.actorType, actorId: actor.actorId,
         requestId: input.requestId, payloadDigest, decision: {},
       }).returning({ id: issueTaskOperationReceipts.id, createdAt: issueTaskOperationReceipts.createdAt });
-      const wakeRequired = updated.status === "todo";
       const decision: IssueTaskReassignDecision = {
         operation: "reassign_unstarted",
         receiptId: receipt!.id,
@@ -286,15 +219,17 @@ export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
         payloadDigest,
         fromAssigneeAgentId: issue.assigneeAgentId,
         toAssigneeAgentId: input.assigneeAgentId,
-        issueStatus: updated.status as IssueTaskReassignDecision["issueStatus"],
+        issueStatus: "backlog",
         statusVersion: updated.statusVersion,
-        wakeRequired,
-        wakeIdempotencyKey: wakeRequired ? taskOperationWakeKey(receipt!.id) : null,
+        // Backlog work does not run, so the decision owes no wake.
+        startWake: "not_required",
         decidedAt: receipt!.createdAt.toISOString(),
       };
-      await tx.update(issueTaskOperationReceipts).set({
-        decision: decision as unknown as Record<string, unknown>, wakeIdempotencyKey: decision.wakeIdempotencyKey,
-      }).where(eq(issueTaskOperationReceipts.id, receipt!.id));
+      // Answer from the persisted row so first responses and replays are byte-identical.
+      const [persisted] = await tx.update(issueTaskOperationReceipts).set({
+        decision: decision as unknown as Record<string, unknown>,
+      }).where(eq(issueTaskOperationReceipts.id, receipt!.id))
+        .returning({ decision: issueTaskOperationReceipts.decision });
       await logActivity(tx, {
         companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId ?? null,
         runId: actor.runId ?? null, agentApiKeyId: actor.agentApiKeyId ?? null,
@@ -302,10 +237,10 @@ export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
         details: {
           receiptId: decision.receiptId, requestId: input.requestId,
           assigneeAgentId: input.assigneeAgentId, _previous: { assigneeAgentId: issue.assigneeAgentId },
-          status: decision.issueStatus, statusVersion: decision.statusVersion, wakeRequired,
+          status: decision.issueStatus, statusVersion: decision.statusVersion,
         },
       });
-      return { decision, replayed: false };
+      return { decision: persisted!.decision as unknown as IssueTaskReassignDecision, replayed: false };
     });
   }
 
@@ -320,8 +255,7 @@ export function issueTaskOperationService(db: Db, deps: { wakeup: Wakeup }) {
         if (!row) throw error;
         return { decision: replayOf(row, payloadDigest), replayed: true };
       });
-      const wake = await admitWake(outcome.decision, actor);
-      return { receipt: outcome.decision, replayed: outcome.replayed, wake };
+      return { receipt: outcome.decision, replayed: outcome.replayed };
     },
   };
 }

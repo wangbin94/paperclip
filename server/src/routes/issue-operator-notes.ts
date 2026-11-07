@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Router, type Request } from "express";
 import { z } from "zod";
-import { and, asc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { issueOperatorNotes, issues, type Db } from "@paperclipai/db";
 import { validate } from "../middleware/validate.js";
 import { conflict, forbidden, notFound } from "../errors.js";
@@ -87,7 +87,7 @@ export function issueOperatorNoteRoutes(db: Db) {
     const { issue } = await loadIssue(req, req.params.id as string, "issue:read");
     const rows = await db.select().from(issueOperatorNotes).where(and(
       eq(issueOperatorNotes.companyId, issue.companyId), eq(issueOperatorNotes.issueId, issue.id),
-    )).orderBy(asc(issueOperatorNotes.createdAt), asc(issueOperatorNotes.id)).limit(OPERATOR_NOTE_LIST_LIMIT);
+    )).orderBy(desc(issueOperatorNotes.createdAt), desc(issueOperatorNotes.id)).limit(OPERATOR_NOTE_LIST_LIMIT);
     res.json(rows.map(serialize));
   });
 

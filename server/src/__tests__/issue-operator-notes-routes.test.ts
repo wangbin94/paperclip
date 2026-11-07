@@ -79,6 +79,21 @@ describeEmbeddedPostgres("issue operator notes routes", () => {
     expect(audits).toHaveLength(2);
   });
 
+  it("keeps the newest 100 operator notes visible when the history grows", async () => {
+    const s = await seedIssue("done");
+    const rows = Array.from({ length: 102 }, (_, index) => ({
+      companyId: s.companyId, issueId: s.issue.id, authorUserId: s.userId,
+      requestId: `history-${index}`, body: `note-${index}`, bodySha256: "test-fixture",
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)),
+    }));
+    await ctx.db.insert(issueOperatorNotes).values(rows);
+    const list = await request(app(s)).get(`/api/issues/${s.issue.id}/operator-notes`);
+    expect(list.status).toBe(200);
+    expect(list.body).toHaveLength(100);
+    expect(list.body[0].body).toBe("note-101");
+    expect(list.body[99].body).toBe("note-2");
+  });
+
   it("validates input bounds and rejects unknown fields", async () => {
     const s = await seedIssue("todo");
     const post = (b: unknown) => request(app(s)).post(`/api/issues/${s.issue.id}/operator-notes`).send(b as object);

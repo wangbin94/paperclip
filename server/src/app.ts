@@ -141,6 +141,7 @@ import { serverVersion } from "./version.js";
 import { primaryAgentRoutes } from "./routes/primary-agent.js";
 import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
+import { issueOperatorNoteRoutes } from "./routes/issue-operator-notes.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { instanceSettingsService } from "./services/instance-settings.js";
 import { openApiRoutes } from "./routes/openapi.js";
@@ -906,6 +907,7 @@ export async function createApp(
   api.use(resourceMembershipRoutes(db));
   api.use(primaryAgentRoutes(db));
   api.use(inboxDismissalRoutes(db));
+  api.use(issueOperatorNoteRoutes(db));
   api.use(instanceSettingsRoutes(db, workerManager, opts.prepareIdleDatabaseBackup));
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));

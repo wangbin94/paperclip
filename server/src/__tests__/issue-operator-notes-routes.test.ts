@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import {
   agents, agentWakeupRequests, heartbeatRuns, issueComments, issueOperatorNotes, issues, activityLog,
+  subscribeDatabaseWork, signalDatabaseWork,
 } from "@paperclipai/db";
 import { issueOperatorNoteRoutes, OPERATOR_NOTE_MAX_BODY_CHARS } from "../routes/issue-operator-notes.js";
 import {
@@ -62,6 +63,29 @@ describeEmbeddedPostgres("issue operator notes routes", () => {
       expect(list.body.map((n: { body: string }) => n.body)).toEqual(["operator says hi"]);
     });
   }
+
+  it("persists the audit but emits no MCP delivery work signals", async () => {
+    const s = await seedIssue("in_progress");
+    const observed: string[] = [];
+    const unsubscribe = subscribeDatabaseWork(ctx.db, "mcp-events", (event) => observed.push(event));
+    try {
+      const res = await request(app(s)).post(`/api/issues/${s.issue.id}/operator-notes`)
+        .send({ requestId: "req-00000008", body: "standalone operator note" });
+      expect(res.status).toBe(201);
+      expect(observed).toEqual([]);
+      // Prove the test listener is alive; only this explicit control signal
+      // may notify the mcp-events queue, not the Operator Note write.
+      await ctx.db.transaction(async tx => signalDatabaseWork(tx, "mcp-events", "control"));
+      expect(observed).toEqual(["intent", "settled"]);
+      const audits = await ctx.db.select().from(activityLog)
+        .where(eq(activityLog.action, "issue.operator_note_added"));
+      expect(audits).toHaveLength(1);
+      expect(audits[0].details).toMatchObject({ noteId: res.body.id });
+      expect(JSON.stringify(audits[0].details)).not.toContain("standalone operator note");
+    } finally {
+      unsubscribe();
+    }
+  });
 
   it("replays the exact payload without duplicating and rejects reuse with different content", async () => {
     const s = await seedIssue("in_progress");

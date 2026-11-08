@@ -2,12 +2,11 @@ import { createHash } from "node:crypto";
 import { Router, type Request } from "express";
 import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
-import { issueOperatorNotes, issues, type Db } from "@paperclipai/db";
+import { activityLog, issueOperatorNotes, issues, type Db } from "@paperclipai/db";
 import { validate } from "../middleware/validate.js";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { authorizationService } from "../services/authorization.js";
-import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
 
 export const OPERATOR_NOTE_MAX_BODY_CHARS = 8_000;
 const OPERATOR_NOTE_LIST_LIMIT = 100;
@@ -26,7 +25,7 @@ function serialize(row: typeof issueOperatorNotes.$inferSelect) {
 }
 
 /**
- * Operator notes: an authenticated board user's private annotation on a task.
+ * Operator notes: a Board-only annotation, readable by authorized Board issue readers.
  * The write touches only `issue_operator_notes` and the activity log. It never
  * updates the issue, enqueues a wake, or writes `issue_comments`, so it cannot
  * move status/assignee/workspace, reach an agent, or count as a review response.
@@ -58,17 +57,19 @@ export function issueOperatorNoteRoutes(db: Db) {
     const { requestId, body } = req.body as z.infer<typeof createOperatorNoteSchema>;
     const bodySha256 = createHash("sha256").update(body).digest("hex");
     const actor = getActorInfo(req);
-    const publications: ActivityPublication[] = [];
     const result = await db.transaction(async (tx) => {
       const [inserted] = await tx.insert(issueOperatorNotes).values({
         companyId: issue.companyId, issueId: issue.id, authorUserId: userId, requestId, body, bodySha256,
       }).onConflictDoNothing().returning();
       if (inserted) {
-        await logActivity(tx as unknown as Db, {
+        // Do not use logActivity/persistActivity: issue activity writes signal
+        // the public MCP event delivery queue, which is not a no-wake path.
+        // Persist the audit row directly inside the note transaction instead.
+        await tx.insert(activityLog).values({
           companyId: issue.companyId, actorType: "user", actorId: actor.actorId,
           action: "issue.operator_note_added", entityType: "issue", entityId: issue.id,
-          details: { noteId: inserted.id, requestId, bodySha256 },
-        }, publications);
+          details: { noteId: inserted.id, bodySha256 },
+        });
         return { note: inserted, replayed: false };
       }
       const [existing] = await tx.select().from(issueOperatorNotes).where(and(
@@ -79,7 +80,6 @@ export function issueOperatorNoteRoutes(db: Db) {
       if (existing.bodySha256 !== bodySha256) throw conflict("requestId was already used for different content");
       return { note: existing, replayed: true };
     });
-    for (const publication of publications) publishActivity(publication);
     res.status(result.replayed ? 200 : 201).json({ ...serialize(result.note), replayed: result.replayed });
   });
 

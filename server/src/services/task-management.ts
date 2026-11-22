@@ -54,7 +54,7 @@ async function authorize(db: Db, issue: Issue, actor: AuthorizationActor, target
     const decision = await authorizationService(db).decide({ actor, action,
       resource: { type: "issue", companyId: issue.companyId, issueId: issue.id,
         projectId: issue.projectId, parentIssueId: issue.parentId,
-        assigneeAgentId: target, assigneeUserId: null },
+        assigneeAgentId: target, assigneeUserId: null, status: issue.status },
       scope: { issueId: issue.id, projectId: issue.projectId, parentIssueId: issue.parentId,
         assigneeAgentId: target, assigneeUserId: null } });
     if (!decision.allowed) throw forbidden(decision.explanation);

@@ -11,7 +11,7 @@ if (!root || !path.isAbsolute(root)) throw new Error("Set an isolated absolute P
 const require = createRequire(path.join(root, "package.json"));
 const load = relative => import(pathToFileURL(path.join(root, "dist", relative)).href);
 const { createDb, startEmbeddedPostgresTestDatabase, companies, agents, issues, heartbeatRuns,
-  agentWakeupRequests, issueTreeHolds, issueTreeHoldMembers, executionWorkspaces } = await import(pathToFileURL(path.join(root, "node_modules/@paperclipai/db/dist/index.js")).href);
+  agentWakeupRequests, issueTreeHolds, issueTreeHoldMembers, executionWorkspaces, companyMemberships } = await import(pathToFileURL(path.join(root, "node_modules/@paperclipai/db/dist/index.js")).href);
 const { eq } = await import(pathToFileURL(path.join(root, "node_modules/drizzle-orm/index.js")).href);
 const { requestTaskManagement: manage, taskManagementDelivery, authorizeTaskManagementWake } = await load("services/task-management.js");
 const { heartbeatService } = await load("services/heartbeat.js");
@@ -180,4 +180,18 @@ test("concurrent late admission conflict reconciles the already admitted Run", a
   assert.equal(receipt.status, "completed"); assert.ok(receipt.runId);
   assert.equal((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, f.issueId))).length, 1);
   assert.equal((await manage(f)).wakeupRequestId, accepted.wakeupRequestId);
+});
+
+
+test("Board key member authorization includes task status; viewer/revoked membership fails", async () => {
+  const f = resume(await seed("cancelled")), userId = randomUUID();
+  f.actor = { type: "board", userId, source: "board_key", companyIds: [f.companyId] };
+  await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: userId, membershipRole: "member" });
+  const accepted = await manage(f); assert.equal(accepted.status, "todo");
+  await authorizeTaskManagementWake(db, f.request.requestId, f.issueId, f.original);
+  await db.update(companyMemberships).set({ membershipRole: "viewer" }).where(eq(companyMemberships.principalId, userId));
+  await assert.rejects(manage(f), /Viewer|grant/);
+  await assert.rejects(authorizeTaskManagementWake(db, f.request.requestId, f.issueId, f.original));
+  await db.update(companyMemberships).set({ status: "inactive" }).where(eq(companyMemberships.principalId, userId));
+  await assert.rejects(manage(f), /member/);
 });

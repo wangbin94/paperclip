@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 FILES = ["index.js", "routes/issues.js", "services/task-management.js",
          "services/delivery-work-notifications.js", "services/heartbeat/queue.js",
@@ -22,12 +23,16 @@ def digest(path):
 
 def atomic_copy(source, target):
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_name(target.name + ".management-new")
-    with temp.open("xb") as out, source.open("rb") as src:
-        shutil.copyfileobj(src, out)
-        out.flush()
-        os.fsync(out.fileno())
-    os.replace(temp, target)
+    handle, name = tempfile.mkstemp(prefix=target.name + ".management-", dir=target.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as out, source.open("rb") as src:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def main():
@@ -68,7 +73,8 @@ def main():
     backup = args.backup.resolve()
     expected = "before" if args.operation == "install" else "after"
     for name, hashes in manifest["files"].items():
-        if digest(installed / "dist" / name) != hashes[expected]:
+        allowed = {hashes[expected]} if args.operation == "install" else {hashes["before"], hashes["after"]}
+        if digest(installed / "dist" / name) not in allowed:
             raise SystemExit("Installed file changed: " + name)
         candidate = artifact / "dist" / name
         if digest(candidate) != hashes["after"]:

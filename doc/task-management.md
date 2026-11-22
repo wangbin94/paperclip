@@ -58,7 +58,8 @@ then run the script's `install` operation with a new `--backup` directory. Start
 the same service and verify health, capability and a disposable task. The script
 does not control services. If startup or acceptance fails, stop it, use the
 script's `rollback` operation with the same artifact and backup, and start the
-original service. Rollback checks current and backup hashes before each change.
+original service. Rollback accepts exact before/after hashes, including a partly installed overlay,
+and checks every backup before changing any file. Unknown file contents are refused.
 
 No database schema changes occur. Keep the existing Claude cleanup patch and all
 other package files. A future official upgrade can remove this extension;

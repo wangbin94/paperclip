@@ -1,3 +1,4 @@
+import { requestTaskManagement, taskManagementSchema } from "../services/task-management.js";
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { parseObject } from "../adapters/utils.js";
 import { prepareRestrictedWorkspaceRetry } from "../services/restricted-workspace-retry.js";
@@ -9503,6 +9504,21 @@ export function issueRoutes(
       actions: [...(active ? [active] : []), ...retainedHolds
         .filter(action => action.id !== active?.id).map(issueRecoveryActionReadModel)],
     });
+  });
+
+  router.get("/task-management/capabilities", (req, res) => {
+    assertBoard(req);
+    res.json({ contract: "paperclip.task-management.v1", actions: ["reassign", "resume"] });
+  });
+  router.post("/issues/:id/manage", validate(taskManagementSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await decideIssueAccess(req, issue, "issue:mutate");
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    const receipt = await requestTaskManagement({ db, companyId: issue.companyId, issueId: issue.id,
+      actor: req.actor, request: req.body });
+    res.status(202).json(receipt);
   });
 
   router.post("/issues/:id/retry", validate(taskRetrySchema), async (req, res) => {

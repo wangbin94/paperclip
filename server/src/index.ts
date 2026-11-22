@@ -1,3 +1,4 @@
+import { taskManagementDelivery } from "./services/task-management.js";
 import { loginCleanupSchedule } from "./services/login-cleanup-state.js";
 import { registerLoginCleanupWork } from "./services/login-cleanup-work.js";
 import { timeStartupRecovery } from "./startup-recovery-timing.js";
@@ -1349,6 +1350,11 @@ async function startServerWithDatabaseTeardown(
     retryMs: 5_000,
     run: signal => caseHandoffDeliveries.sweepPending(signal),
     hasPending: () => caseHandoffDeliveries.hasPending(),
+  });
+  const managementDelivery = taskManagementDelivery(db, environmentLeaseCleanupHeartbeat);
+  deliveryWork.register(DELIVERY_QUEUES.taskManagement, {
+    retryMs: 5_000, run: signal => managementDelivery.sweepPending(signal),
+    hasPending: () => managementDelivery.hasPending(),
   });
   let unregisterTerminalWorkspaceProbe: (() => void) | undefined;
   const fastResponses = app.locals.fastResponses as ReturnType<typeof import("./services/fast-responses.js").fastResponseService>;

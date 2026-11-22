@@ -1,3 +1,4 @@
+import { authorizeTaskManagementWake } from "../task-management.js";
 import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
@@ -2328,7 +2329,20 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         opts.idempotencyKey !== museRequest.idempotencyKey)) {
       throw conflict("Muse work request does not match its admission authority.");
     }
-    const receiptRequest = durableRequest ?? dotRequest ?? museRequest ?? caseReceipt;
+    const managementRequestId = opts.durableTaskManagementRequestId;
+    let managementReceipt: { id: string; requestedAt: Date } | undefined;
+    if (managementRequestId) {
+      if (!issueId || durableRequest || dotRequest || museRequest || caseRequest ||
+          opts.requestedByActorType !== "user" || reason !== "task_management" || source !== "on_demand")
+        throw conflict("Invalid task management wake authority");
+      const accepted = await authorizeTaskManagementWake(db, managementRequestId, issueId, agentId);
+      if (accepted.actorId !== opts.requestedByActorId || opts.idempotencyKey !== `task-management-wake:${managementRequestId}`)
+        throw conflict("Task management requester changed");
+      managementReceipt = { id: accepted.id, requestedAt: accepted.requestedAt };
+      opts = { ...opts, allowRunCoalescing: false,
+        issueStateGuard: { assigneeAgentId: agentId, statuses: ["todo"], statusVersion: accepted.statusVersion } };
+    }
+    const receiptRequest = durableRequest ?? dotRequest ?? museRequest ?? caseReceipt ?? managementReceipt;
     const durableReceiptFields = receiptRequest
       ? { id: receiptRequest.id, requestedAt: receiptRequest.requestedAt }
       : {};
@@ -2341,6 +2355,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (receipt && durableRequest) assertDurableChatWakeupReceipt(durableRequest, receipt);
+      if (receipt && managementRequestId && (receipt.companyId !== agent.companyId || receipt.agentId !== agentId ||
+          receipt.payload?.issueId !== issueId || receipt.requestedByActorType !== "user" ||
+          receipt.requestedByActorId !== opts.requestedByActorId ||
+          receipt.idempotencyKey !== `task-management-wake:${managementRequestId}`))
+        throw conflict("Task management wake receipt identity changed");
       if (receipt && caseRequest && (receipt.companyId !== agent.companyId || receipt.agentId !== agentId ||
           receipt.payload?.issueId !== caseRequest.issueId || receipt.idempotencyKey !== `case-handoff:${caseRequest.handoffId}`))
         throw conflict("Case handoff wake receipt identity changed");
@@ -2933,6 +2952,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           );
           if (durableReceipt)
             return { kind: "durable" as const, receipt: durableReceipt };
+          if (managementRequestId) await authorizeTaskManagementWake(tx as unknown as Db, managementRequestId, issueId, agentId);
           if (caseRequest) {
             const [handoff] = await tx.select().from(caseHandoffs).where(and(eq(caseHandoffs.id, caseRequest.handoffId),
               eq(caseHandoffs.companyId, agent.companyId),

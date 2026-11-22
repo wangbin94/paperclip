@@ -832,6 +832,8 @@ export interface WakeupOptions {
   queuedCommentRequestId?: string;
   /** Internal delivery of the authenticated task-level Retry receipt. */
   taskRetryRequestId?: string;
+  /** Internal delivery of an accepted Board management mutation. */
+  durableTaskManagementRequestId?: string;
   /** Exact failed run selected by an authenticated board Retry request. */
   failedRunId?: string | null;
   durableChatRequest?: DurableChatWakeupRequest;

@@ -99,7 +99,7 @@ def main():
                 raise SystemExit("Backup hash mismatch: " + name)
         for name, hashes in manifest["files"].items():
             if hashes["before"] is None:
-                (installed / "dist" / name).unlink()
+                (installed / "dist" / name).unlink(missing_ok=True)
             else:
                 atomic_copy(backup / name, installed / "dist" / name)
     print(json.dumps({"operation": args.operation, "files": len(FILES), "backup": str(backup)}))
